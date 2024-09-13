@@ -4,9 +4,9 @@ import re
 import yt_dlp
 import customtkinter as ctk
 from threading import Thread
-from tkinter import messagebox, StringVar, DoubleVar, filedialog
+from tkinter import messagebox, StringVar, DoubleVar, filedialog, ttk
 import logging
-from PIL import Image
+from PIL import Image, ImageTk
 import requests
 from io import BytesIO
 import webbrowser
@@ -26,6 +26,7 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 log_file = f'youtube_downloader_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 logging.basicConfig(filename=log_file, level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 class DownloadThread(Thread):
     def __init__(self, url, save_path, progress_callback, finished_callback, error_callback, ydl_opts):
@@ -52,8 +53,12 @@ class DownloadThread(Thread):
             self.ydl._progress_hooks.clear()
             self.finished_callback("Download stopped by user.")
 
+
 class FrameAnalysisThread(Thread):
-    def __init__(self, video_path, thumbnail_path, display_callback, log_callback, similarity_threshold, max_results=5):
+    # Initialize the model once and reuse it
+    model = None
+
+    def __init__(self, video_path, thumbnail_path, display_callback, log_callback, similarity_threshold, max_results=10):
         super().__init__()
         self.video_path = video_path
         self.thumbnail_path = thumbnail_path
@@ -61,6 +66,20 @@ class FrameAnalysisThread(Thread):
         self.log_callback = log_callback
         self.similarity_threshold = similarity_threshold
         self.max_results = max_results
+
+        # Load model if not already loaded
+        if FrameAnalysisThread.model is None:
+            FrameAnalysisThread.model = self.load_model()
+
+    def load_model(self):
+        try:
+            base_model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')
+            model = tf.keras.Model(inputs=base_model.input, outputs=base_model.output)
+            self.log_callback("Model loaded successfully.")
+            return model
+        except Exception as e:
+            self.log_callback(f"Error loading model: {str(e)}")
+            raise e
 
     def run(self):
         try:
@@ -70,9 +89,7 @@ class FrameAnalysisThread(Thread):
             self.log_callback(f"Error during frame analysis: {str(e)}")
 
     def find_similar_frames(self):
-        # Load pre-trained MobileNetV2 model + higher level layers
-        base_model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')
-        model = tf.keras.Model(inputs=base_model.input, outputs=base_model.output)
+        model = FrameAnalysisThread.model
 
         # Load and preprocess the thumbnail image
         thumbnail = keras_image.load_img(self.thumbnail_path, target_size=(224, 224))
@@ -94,24 +111,22 @@ class FrameAnalysisThread(Thread):
         duration = frame_count / fps if fps != 0 else 0
 
         similar_frames = []
-        max_results = self.max_results  # Limit to 5 similar frames
 
         # Adjusted frame extraction interval
-        total_frames_to_analyze = 200  # Limit total frames to analyze
-        interval = max(duration / total_frames_to_analyze, 1)  # At least 1 second interval
-
-        timestamps = np.arange(0, duration, interval)
+        total_frames_to_analyze = min(frame_count, 200)  # Limit total frames to analyze
+        frame_indices = np.linspace(0, frame_count - 1, total_frames_to_analyze, dtype=np.int32)
 
         frames = []
         frame_timestamps = []
 
         # Collect frames to process
-        for timestamp in timestamps:
-            cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ret, frame = cap.read()
             if not ret:
                 continue
             frames.append(frame)
+            timestamp = idx / fps
             frame_timestamps.append(timestamp)
 
         cap.release()
@@ -121,18 +136,18 @@ class FrameAnalysisThread(Thread):
             return []
 
         # Preprocess frames in batch
-        frame_arrays = []
-        for frame in frames:
-            frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            frame_pil = frame_pil.resize((224, 224))
-            frame_array = keras_image.img_to_array(frame_pil)
-            frame_arrays.append(frame_array)
-
-        frame_arrays = np.array(frame_arrays)
-        frame_arrays = preprocess_input(frame_arrays)
+        frame_arrays = np.array([
+            preprocess_input(
+                np.expand_dims(
+                    cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (224, 224)),
+                    axis=0
+                )
+            )[0]
+            for frame in frames
+        ])
 
         # Extract features from frames
-        frame_features = model.predict(frame_arrays)
+        frame_features = model.predict(frame_arrays, batch_size=32, verbose=0)
 
         # Compute cosine similarity between thumbnail and all frames
         similarities = cosine_similarity(
@@ -150,22 +165,29 @@ class FrameAnalysisThread(Thread):
         all_frames.sort(key=lambda x: -x[1])  # Higher similarity first
 
         # Take top max_results frames
-        top_frames = all_frames[:max_results]
+        top_frames = all_frames[:self.max_results]
 
         # Prepare the final similar frames list
         similar_frames = []
         for frame, sim, timestamp in top_frames:
             frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             similar_frames.append((frame_pil, sim, timestamp))
-            self.log_callback(f"Timestamp {timestamp:.2f}s: Similarity={sim:.4f}")
+            self.log_callback(f"Timestamp {self.format_timestamp(timestamp)}: Similarity={sim:.4f}")
 
         return similar_frames
+
+    @staticmethod
+    def format_timestamp(seconds):
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}:{secs:02d}"
+
 
 class YouTubeDownloader(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("YouTube Downloader")
-        self.geometry("900x700")
+        self.geometry("1200x800")
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self.create_tabs()
@@ -180,12 +202,12 @@ class YouTubeDownloader(ctk.CTk):
         self.load_settings()
 
     def create_tabs(self):
-        self.tabview = ctk.CTkTabview(self, width=900, height=700)
+        self.tabview = ctk.CTkTabview(self, width=1180, height=780)
         self.tabview.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         self.tabview.add("Download")
         self.tabview.add("Analysis")
         self.tabview.add("Settings")
-        
+
         self.create_download_tab()
         self.create_analysis_tab()
         self.create_settings_tab()
@@ -193,111 +215,150 @@ class YouTubeDownloader(ctk.CTk):
     def create_download_tab(self):
         download_tab = self.tabview.tab("Download")
         download_tab.grid_columnconfigure(0, weight=1)
-        
+
         # URL Entry and Fetch
         url_frame = ctk.CTkFrame(download_tab)
-        url_frame.pack(fill="x", pady=5, padx=10)
-        
+        url_frame.pack(fill="x", pady=10, padx=10)
+
         self.url_entry = ctk.CTkEntry(url_frame, placeholder_text="Enter YouTube URL")
         self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
-        paste_button = ctk.CTkButton(url_frame, text="Paste", width=60, command=self.paste_url)
+
+        paste_button = ctk.CTkButton(url_frame, text="Paste", width=80, command=self.paste_url)
         paste_button.pack(side="left")
-        
+
         fetch_button = ctk.CTkButton(download_tab, text="Fetch Info", command=self.fetch_video_info)
         fetch_button.pack(fill="x", pady=5, padx=10)
-        
+
         # Thumbnail Display
-        self.thumbnail_label = ctk.CTkLabel(download_tab, text="", anchor="center")
+        thumbnail_frame = ctk.CTkFrame(download_tab)
+        thumbnail_frame.pack(fill="x", pady=5, padx=10)
+
+        self.thumbnail_label = ctk.CTkLabel(thumbnail_frame, text="", anchor="center")
         self.thumbnail_label.pack(pady=5, padx=10)
-        
+
+        # Video Information Display
+        info_frame = ctk.CTkFrame(download_tab)
+        info_frame.pack(fill="x", pady=5, padx=10)
+
+        self.info_text = ctk.CTkTextbox(info_frame, height=100, state="disabled")
+        self.info_text.pack(fill="both", expand=True)
+
         # Quality Selection
         quality_frame = ctk.CTkFrame(download_tab)
         quality_frame.pack(fill="x", pady=5, padx=10)
-        
+
         quality_label = ctk.CTkLabel(quality_frame, text="Quality:")
         quality_label.pack(side="left")
-        
+
         self.quality_optionmenu = ctk.CTkOptionMenu(quality_frame, values=["Best", "4K", "2K", "1080p", "720p", "480p", "360p", "240p", "144p"])
         self.quality_optionmenu.pack(side="left", padx=10)
         self.quality_optionmenu.set("Best")
-        
+
         # Download Button and Progress
         download_button = ctk.CTkButton(download_tab, text="Download", command=self.download)
         download_button.pack(fill="x", pady=5, padx=10)
         self.download_button = download_button
         self.download_button.configure(state="disabled")
-        
+
         progress_frame = ctk.CTkFrame(download_tab)
         progress_frame.pack(fill="x", pady=5, padx=10)
-        
+
         self.progress_bar = ctk.CTkProgressBar(progress_frame)
         self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.progress_bar.set(0)
-        
+
         self.progress_label = ctk.CTkLabel(progress_frame, text="0%")
         self.progress_label.pack(side="left")
-        
+
         # Status Label
         self.download_status_var = StringVar(value="Idle")
         self.download_status_label = ctk.CTkLabel(download_tab, textvariable=self.download_status_var)
         self.download_status_label.pack(fill="x", pady=5, padx=10)
-        
+
         # Log Textbox
-        self.log_text = ctk.CTkTextbox(download_tab, height=150)
+        self.log_text = ctk.CTkTextbox(download_tab, height=150, state="disabled")
         self.log_text.pack(fill="both", expand=True, pady=5, padx=10)
-        
+
         # Control Buttons
         control_frame = ctk.CTkFrame(download_tab)
         control_frame.pack(fill="x", pady=5, padx=10)
-        
+
         stop_button = ctk.CTkButton(control_frame, text="Stop", command=self.stop_download, state="disabled")
         stop_button.pack(side="left", padx=(0, 5))
         self.stop_button = stop_button
-        
+
         clear_log_button = ctk.CTkButton(control_frame, text="Clear Log", command=self.clear_log)
         clear_log_button.pack(side="left", padx=5)
 
     def create_analysis_tab(self):
         analysis_tab = self.tabview.tab("Analysis")
         analysis_tab.grid_columnconfigure(0, weight=1)
-        
+
         # Similarity Threshold
         threshold_frame = ctk.CTkFrame(analysis_tab)
         threshold_frame.pack(fill="x", pady=5, padx=10)
-        
+
         similarity_label = ctk.CTkLabel(threshold_frame, text="Similarity Threshold:")
         similarity_label.pack(side="left")
-        
+
         self.similarity_threshold_var = DoubleVar(value=0.8)
         self.similarity_slider = ctk.CTkSlider(threshold_frame, from_=0.5, to=1.0, number_of_steps=50,
                                                variable=self.similarity_threshold_var, command=self.update_similarity_label)
         self.similarity_slider.pack(side="left", fill="x", expand=True, padx=(10, 10))
-        
+
         self.similarity_value_label = ctk.CTkLabel(threshold_frame, text=f"{self.similarity_threshold_var.get():.2f}")
         self.similarity_value_label.pack(side="left")
-        
+
         # Analyze and Save Buttons
         analyze_frame = ctk.CTkFrame(analysis_tab)
         analyze_frame.pack(fill="x", pady=5, padx=10)
-        
+
         analyze_button = ctk.CTkButton(analyze_frame, text="Find Similar Frames", command=self.analyze_frames)
-        analyze_button.pack(side="left", fill="x", expand=True, padx=(0,5))
+        analyze_button.pack(side="left", fill="x", expand=True, padx=(0, 5))
         self.analyze_button = analyze_button
         self.analyze_button.configure(state="disabled")
-        
+
         save_button = ctk.CTkButton(analyze_frame, text="Save Selected Frame", command=self.save_selected_frame, state="disabled")
         save_button.pack(side="left", fill="x", expand=True, padx=5)
         self.save_frame_button = save_button
-        
+
+        export_button = ctk.CTkButton(analyze_frame, text="Export to CSV", command=self.export_to_csv, state="disabled")
+        export_button.pack(side="left", fill="x", expand=True, padx=5)
+        self.export_button = export_button
+
         download_all_button = ctk.CTkButton(analysis_tab, text="Download All Frames", command=self.download_all_frames, state="disabled")
         download_all_button.pack(fill="x", pady=5, padx=10)
         self.download_all_frames_button = download_all_button
-        
-        # Similar Frames Display
-        self.similar_frames_canvas = ctk.CTkScrollableFrame(analysis_tab, width=850, height=400)
-        self.similar_frames_canvas.pack(fill="both", expand=True, pady=5, padx=10)
-        
+
+        # Similar Frames Display with Treeview
+        display_frame = ctk.CTkFrame(analysis_tab)
+        display_frame.pack(fill="both", expand=True, pady=5, padx=10)
+
+        # Adding a Treeview to display timestamps and similarity
+        self.frames_tree = ttk.Treeview(display_frame, columns=("Timestamp", "Similarity"), show='headings', selectmode='browse')
+        self.frames_tree.heading("Timestamp", text="Timestamp (MM:SS)")
+        self.frames_tree.heading("Similarity", text="Similarity")
+        self.frames_tree.column("Timestamp", anchor="center", width=120)
+        self.frames_tree.column("Similarity", anchor="center", width=100)
+        self.frames_tree.pack(side="left", fill="both", expand=True)
+
+        self.frames_tree.bind("<Double-1>", self.on_tree_item_double_click)
+
+        # Adding a scrollbar to the treeview
+        scrollbar = ttk.Scrollbar(display_frame, orient="vertical", command=self.frames_tree.yview)
+        self.frames_tree.configure(yscroll=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+
+        # Frame Preview Section
+        preview_frame = ctk.CTkFrame(analysis_tab)
+        preview_frame.pack(fill="both", expand=True, pady=5, padx=10)
+
+        self.preview_label = ctk.CTkLabel(preview_frame, text="Selected Frame Preview:", anchor="w")
+        self.preview_label.pack(fill="x", pady=(0, 5), padx=10)
+
+        self.frame_preview = ctk.CTkLabel(preview_frame, text="", anchor="center")
+        self.frame_preview.pack(fill="both", expand=True, pady=(0, 5), padx=10)
+
         # Status Label
         self.analysis_status_var = StringVar(value="Idle")
         self.analysis_status_label = ctk.CTkLabel(analysis_tab, textvariable=self.analysis_status_var)
@@ -306,30 +367,30 @@ class YouTubeDownloader(ctk.CTk):
     def create_settings_tab(self):
         settings_tab = self.tabview.tab("Settings")
         settings_tab.grid_columnconfigure(0, weight=1)
-        
+
         # Theme Switch
         theme_frame = ctk.CTkFrame(settings_tab)
         theme_frame.pack(fill="x", pady=10, padx=10)
-        
+
         self.theme_switch_var = ctk.StringVar(value="dark")
         self.theme_switch = ctk.CTkSwitch(theme_frame, text="Light Mode", command=self.change_theme,
                                          variable=self.theme_switch_var, onvalue="light", offvalue="dark")
         self.theme_switch.pack(side="left")
-        
+
         # GitHub and About Buttons
         info_frame = ctk.CTkFrame(settings_tab)
         info_frame.pack(fill="x", pady=10, padx=10)
-        
+
         github_button = ctk.CTkButton(info_frame, text="GitHub", command=self.open_github)
         github_button.pack(side="left", padx=(0, 5))
-        
+
         about_button = ctk.CTkButton(info_frame, text="About", command=self.show_about)
         about_button.pack(side="left", padx=5)
-        
+
         # Open Download Folder
         folder_button = ctk.CTkButton(settings_tab, text="Open Download Folder", command=self.open_download_folder)
         folder_button.pack(fill="x", pady=5, padx=10)
-        
+
         # Quit Button
         quit_button = ctk.CTkButton(settings_tab, text="Quit", command=self.quit_app)
         quit_button.pack(fill="x", pady=5, padx=10)
@@ -360,18 +421,7 @@ class YouTubeDownloader(ctk.CTk):
                     messagebox.showwarning("Playlist Detected", "This URL corresponds to a playlist. Please enter a single video URL.")
                     return
                 self.formats = self.video_info['formats']
-                self.log(f"Video title: {self.video_info.get('title', 'N/A')}")
-                self.log(f"Channel: {self.video_info.get('channel', 'N/A')}")
-                duration_seconds = self.video_info.get('duration', 0)
-                minutes, seconds = divmod(duration_seconds, 60)
-                self.log(f"Duration: {int(minutes)}:{int(seconds):02d}")
-                self.log(f"View count: {self.video_info.get('view_count', 'N/A')}")
-                upload_date = self.video_info.get('upload_date', 'N/A')
-                if upload_date != 'N/A':
-                    upload_date_formatted = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
-                else:
-                    upload_date_formatted = 'N/A'
-                self.log(f"Upload date: {upload_date_formatted}")
+                self.display_video_info()
                 self.display_thumbnail(self.video_info.get('thumbnail', ''))
 
                 # Enable the download button
@@ -383,13 +433,41 @@ class YouTubeDownloader(ctk.CTk):
             self.log(f"Error fetching video info: {str(e)}")
             messagebox.showerror("Error", f"An error occurred: {str(e)}")
 
+    def display_video_info(self):
+        if not self.video_info:
+            return
+        self.info_text.configure(state="normal")
+        self.info_text.delete("1.0", "end")
+        title = self.video_info.get('title', 'N/A')
+        channel = self.video_info.get('uploader', 'N/A')
+        duration_seconds = self.video_info.get('duration', 0)
+        minutes, seconds = divmod(duration_seconds, 60)
+        duration = f"{int(minutes)}:{int(seconds):02d}"
+        view_count = self.video_info.get('view_count', 'N/A')
+        upload_date = self.video_info.get('upload_date', 'N/A')
+        if upload_date != 'N/A':
+            upload_date_formatted = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+        else:
+            upload_date_formatted = 'N/A'
+
+        info = (
+            f"Title: {title}\n"
+            f"Channel: {channel}\n"
+            f"Duration: {duration}\n"
+            f"View count: {view_count}\n"
+            f"Upload date: {upload_date_formatted}\n"
+        )
+        self.info_text.insert("end", info)
+        self.info_text.configure(state="disabled")
+        self.log(info)
+
     def display_thumbnail(self, thumbnail_url):
         try:
             if thumbnail_url:
                 response = requests.get(thumbnail_url)
                 img = Image.open(BytesIO(response.content))
-                img_resized = img.resize((200, 150), Image.LANCZOS)
-                photo = ctk.CTkImage(light_image=img_resized, dark_image=img_resized, size=(200, 150))
+                img_resized = img.resize((300, 200), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img_resized)
                 self.thumbnail_label.configure(image=photo)
                 self.thumbnail_label.image = photo
 
@@ -418,15 +496,15 @@ class YouTubeDownloader(ctk.CTk):
             self.display_similar_frames,
             self.log,
             similarity_threshold,
-            max_results=5  # Limit to 5 similar frames
+            max_results=20  # Adjust as needed
         )
         self.analysis_thread.start()
         self.analysis_status_var.set("Analyzing frames...")
 
     def display_similar_frames(self, frames):
         # Clear previous frames
-        for widget in self.similar_frames_canvas.winfo_children():
-            widget.destroy()
+        for item in self.frames_tree.get_children():
+            self.frames_tree.delete(item)
 
         if not frames:
             self.log("No similar frames found.")
@@ -437,38 +515,38 @@ class YouTubeDownloader(ctk.CTk):
         self.selected_frame = None  # Reset selected frame
         self.frames = frames  # Store frames for reference
 
-        def on_frame_click(idx):
-            self.selected_frame = idx
-            self.save_frame_button.configure(state="normal")
-            # Highlight selected frame
-            for i, child in enumerate(self.similar_frames_canvas.winfo_children()):
-                child.configure(border_color="transparent")
-            selected_widget = self.similar_frames_canvas.winfo_children()[idx]
-            selected_widget.configure(border_color="blue")
-
         for idx, (frame_pil, similarity, timestamp) in enumerate(frames):
-            try:
-                img = frame_pil.resize((160, 120), Image.LANCZOS)
-                photo = ctk.CTkImage(light_image=img, dark_image=img, size=(160, 120))
+            # Insert into treeview with formatted timestamp
+            formatted_timestamp = self.format_timestamp(timestamp)
+            self.frames_tree.insert("", "end", iid=idx, values=(formatted_timestamp, f"{similarity:.2f}"))
 
-                # Create a button for each frame
-                frame_button = ctk.CTkButton(
-                    self.similar_frames_canvas,
-                    image=photo,
-                    text=f"Sim: {similarity:.2f}\nTime: {timestamp:.1f}s",
-                    compound="top",
-                    command=lambda idx=idx: on_frame_click(idx)
-                )
-                frame_button.image = photo  # Keep a reference
-                frame_button.grid(row=idx//2, column=idx%2, padx=10, pady=10, sticky="nsew")
+            # Optionally, save frame images for potential download
+            frames[idx] = (frame_pil, similarity, timestamp)
 
-            except Exception as e:
-                self.log(f"Error displaying similar frame: {str(e)}")
-
-        # Enable the "Download All Frames" button
+        # Enable the "Download All Frames" and "Export to CSV" buttons
         self.download_all_frames_button.configure(state="normal")
+        self.export_button.configure(state="normal")
         self.analysis_status_var.set("Analysis completed.")
         self.analyze_button.configure(state="normal")
+
+    @staticmethod
+    def format_timestamp(seconds):
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}:{secs:02d}"
+
+    def on_tree_item_double_click(self, event):
+        selected_item = self.frames_tree.focus()
+        if selected_item:
+            idx = int(selected_item)
+            frame_pil, similarity, timestamp = self.frames[idx]
+            # Display the selected frame in the preview section
+            img_resized = frame_pil.resize((400, 300), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img_resized)
+            self.frame_preview.configure(image=photo)
+            self.frame_preview.image = photo
+            self.selected_frame = idx
+            self.save_frame_button.configure(state="normal")
 
     def save_selected_frame(self):
         if self.selected_frame is None:
@@ -479,7 +557,7 @@ class YouTubeDownloader(ctk.CTk):
         # Ask user where to save the image
         save_path = filedialog.asksaveasfilename(defaultextension=".jpg",
                                                  filetypes=[("JPEG Image", "*.jpg"), ("PNG Image", "*.png")],
-                                                 initialfile=f"frame_{timestamp:.1f}s.jpg")
+                                                 initialfile=f"frame_{self.format_timestamp(timestamp)}.jpg")
         if save_path:
             selected_frame_pil.save(save_path)
             messagebox.showinfo("Saved", f"Frame saved to {save_path}")
@@ -493,25 +571,41 @@ class YouTubeDownloader(ctk.CTk):
         directory = filedialog.askdirectory(title="Select Directory to Save Frames")
         if directory:
             for idx, (frame_pil, similarity, timestamp) in enumerate(self.frames):
-                filename = os.path.join(directory, f"frame_{timestamp:.1f}s.jpg")
+                filename = os.path.join(directory, f"frame_{self.format_timestamp(timestamp)}.jpg")
                 frame_pil.save(filename)
             messagebox.showinfo("Saved", f"All frames saved to {directory}")
 
-    def download_frame(self, frame_pil, timestamp):
-        # Download a single frame
-        save_path = filedialog.asksaveasfilename(defaultextension=".jpg",
-                                                 filetypes=[("JPEG Image", "*.jpg"), ("PNG Image", "*.png")],
-                                                 initialfile=f"frame_{timestamp:.1f}s.jpg")
+    def export_to_csv(self):
+        if not self.frames:
+            messagebox.showwarning("No Frames", "No frames to export.")
+            return
+
+        # Ask user where to save the CSV
+        save_path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                 filetypes=[("CSV File", "*.csv")],
+                                                 initialfile="similar_frames.csv")
         if save_path:
-            frame_pil.save(save_path)
-            messagebox.showinfo("Saved", f"Frame saved to {save_path}")
+            import csv
+            try:
+                with open(save_path, mode='w', newline='', encoding='utf-8') as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow(["Timestamp (MM:SS)", "Similarity"])
+                    for frame_pil, similarity, timestamp in self.frames:
+                        formatted_timestamp = self.format_timestamp(timestamp)
+                        writer.writerow([formatted_timestamp, f"{similarity:.2f}"])
+                messagebox.showinfo("Exported", f"Frame data exported to {save_path}")
+            except Exception as e:
+                self.log(f"Error exporting to CSV: {str(e)}")
+                messagebox.showerror("Error", f"Failed to export CSV: {str(e)}")
 
     def download(self):
         if not self.video_info:
             messagebox.showwarning("Error", "Please fetch video info first.")
             return
 
-        save_path = os.getcwd()
+        save_path = filedialog.askdirectory(title="Select Download Directory")
+        if not save_path:
+            return
 
         quality = self.quality_optionmenu.get()
         if quality == "Best":
@@ -528,7 +622,7 @@ class YouTubeDownloader(ctk.CTk):
             'format': format_string,
             'progress_hooks': [self.update_progress],
             'noplaylist': True,
-            'noprogress': True,
+            'noprogress': False,
             'no_warnings': True,
             'quiet': True,
             'merge_output_format': 'mp4',
@@ -556,7 +650,6 @@ class YouTubeDownloader(ctk.CTk):
         if d['status'] == 'downloading':
             try:
                 percent_str = d.get('_percent_str', '0%').strip()
-                # Handle cases where percent_str might have multiple '%' symbols or unexpected formats
                 percent_match = re.search(r'([\d.]+)%', percent_str)
                 percent = float(percent_match.group(1)) if percent_match else 0.0
                 self.progress_bar.set(percent / 100)
@@ -586,7 +679,7 @@ class YouTubeDownloader(ctk.CTk):
     def reset_progress(self):
         self.progress_bar.set(0)
         self.progress_label.configure(text="0%")
-        self.download_button.configure(state="disabled")
+        self.download_button.configure(state="normal" if self.video_info else "disabled")
         self.stop_button.configure(state="disabled")
 
     def stop_download(self):
@@ -597,12 +690,16 @@ class YouTubeDownloader(ctk.CTk):
             self.download_status_var.set("Download stopped by user.")
 
     def log(self, message):
+        self.log_text.configure(state="normal")
         self.log_text.insert("end", f"{message}\n")
         self.log_text.see("end")
+        self.log_text.configure(state="disabled")
         logging.info(message)
 
     def clear_log(self):
+        self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
 
     def change_theme(self):
         if self.theme_switch_var.get() == "light":
@@ -617,7 +714,7 @@ class YouTubeDownloader(ctk.CTk):
     def show_about(self):
         about_text = (
             "YouTube Downloader\n\n"
-            "Version: 2.2\n"
+            "Version: 2.3\n"
             "Author: Your Name\n"
             "License: MIT\n\n"
             "This application allows you to download YouTube videos easily.\n"
@@ -625,8 +722,10 @@ class YouTubeDownloader(ctk.CTk):
             "- Select video quality\n"
             "- Download videos\n"
             "- Find frames similar to the thumbnail\n"
-            "- Display frames as buttons and download selected frames\n"
-            "- Save selected frame or download all similar frames"
+            "- Display similar frames with images and timestamps\n"
+            "- Preview and save selected frames\n"
+            "- Export similar frames data to CSV\n"
+            "- Download all similar frames at once"
         )
         messagebox.showinfo("About", about_text)
 
@@ -668,6 +767,12 @@ class YouTubeDownloader(ctk.CTk):
 
     def on_closing(self):
         self.quit_app()
+
+    def format_timestamp(self, seconds):
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}:{secs:02d}"
+
 
 if __name__ == "__main__":
     app = YouTubeDownloader()
