@@ -188,9 +188,9 @@ class YouTubeDownloader(ctk.CTk):
         super().__init__()
         self.title("YouTube Downloader")
         self.geometry("1200x800")
-        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        self.create_tabs()
+        self.create_sidebar()
         self.download_thread = None
         self.analysis_thread = None
         self.formats = []
@@ -199,25 +199,69 @@ class YouTubeDownloader(ctk.CTk):
         self.thumbnail_file_path = ""
         self.selected_frame = None  # To store the user-selected frame
         self.frames = []  # Store all frames for downloading
+        self.current_frame = None
         self.load_settings()
 
-    def create_tabs(self):
-        self.tabview = ctk.CTkTabview(self, width=1180, height=780)
-        self.tabview.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.tabview.add("Download")
-        self.tabview.add("Analysis")
-        self.tabview.add("Settings")
+    def create_sidebar(self):
+        # Create the sidebar frame
+        self.sidebar_frame = ctk.CTkFrame(self, width=200)
+        self.sidebar_frame.grid(row=0, column=0, sticky="ns")
+        self.sidebar_frame.grid_rowconfigure(4, weight=1)
 
-        self.create_download_tab()
-        self.create_analysis_tab()
-        self.create_settings_tab()
+        # Sidebar buttons
+        self.download_button_sidebar = ctk.CTkButton(self.sidebar_frame, text="Download", command=self.show_download_frame)
+        self.download_button_sidebar.grid(row=0, column=0, pady=10, padx=10, sticky="ew")
 
-    def create_download_tab(self):
-        download_tab = self.tabview.tab("Download")
-        download_tab.grid_columnconfigure(0, weight=1)
+        self.analysis_button_sidebar = ctk.CTkButton(self.sidebar_frame, text="Analysis", command=self.show_analysis_frame)
+        self.analysis_button_sidebar.grid(row=1, column=0, pady=10, padx=10, sticky="ew")
+
+        self.settings_button_sidebar = ctk.CTkButton(self.sidebar_frame, text="Settings", command=self.show_settings_frame)
+        self.settings_button_sidebar.grid(row=2, column=0, pady=10, padx=10, sticky="ew")
+
+        # Exit button at the bottom
+        self.exit_button = ctk.CTkButton(self.sidebar_frame, text="Exit", command=self.quit_app)
+        self.exit_button.grid(row=5, column=0, pady=10, padx=10, sticky="sew")
+
+        # Create main frames
+        self.main_frame = ctk.CTkFrame(self)
+        self.main_frame.grid(row=0, column=1, sticky="nsew")
+        self.main_frame.grid_rowconfigure(0, weight=1)
+        self.main_frame.grid_columnconfigure(0, weight=1)
+
+        # Initialize frames for each section
+        self.download_frame = ctk.CTkFrame(self.main_frame)
+        self.analysis_frame = ctk.CTkFrame(self.main_frame)
+        self.settings_frame = ctk.CTkFrame(self.main_frame)
+
+        # Create content for each frame
+        self.create_download_frame()
+        self.create_analysis_frame()
+        self.create_settings_frame()
+
+        # Show the download frame by default
+        self.show_download_frame()
+
+    def show_download_frame(self):
+        self.analysis_frame.grid_forget()
+        self.settings_frame.grid_forget()
+        self.download_frame.grid(row=0, column=0, sticky="nsew")
+
+    def show_analysis_frame(self):
+        self.download_frame.grid_forget()
+        self.settings_frame.grid_forget()
+        self.analysis_frame.grid(row=0, column=0, sticky="nsew")
+
+    def show_settings_frame(self):
+        self.download_frame.grid_forget()
+        self.analysis_frame.grid_forget()
+        self.settings_frame.grid(row=0, column=0, sticky="nsew")
+
+    def create_download_frame(self):
+        download_frame = self.download_frame
+        download_frame.grid_columnconfigure(0, weight=1)
 
         # URL Entry and Fetch
-        url_frame = ctk.CTkFrame(download_tab)
+        url_frame = ctk.CTkFrame(download_frame)
         url_frame.pack(fill="x", pady=10, padx=10)
 
         self.url_entry = ctk.CTkEntry(url_frame, placeholder_text="Enter YouTube URL")
@@ -226,25 +270,25 @@ class YouTubeDownloader(ctk.CTk):
         paste_button = ctk.CTkButton(url_frame, text="Paste", width=80, command=self.paste_url)
         paste_button.pack(side="left")
 
-        fetch_button = ctk.CTkButton(download_tab, text="Fetch Info", command=self.fetch_video_info)
+        fetch_button = ctk.CTkButton(download_frame, text="Fetch Info", command=self.fetch_video_info)
         fetch_button.pack(fill="x", pady=5, padx=10)
 
         # Thumbnail Display
-        thumbnail_frame = ctk.CTkFrame(download_tab)
+        thumbnail_frame = ctk.CTkFrame(download_frame)
         thumbnail_frame.pack(fill="x", pady=5, padx=10)
 
         self.thumbnail_label = ctk.CTkLabel(thumbnail_frame, text="", anchor="center")
         self.thumbnail_label.pack(pady=5, padx=10)
 
         # Video Information Display
-        info_frame = ctk.CTkFrame(download_tab)
+        info_frame = ctk.CTkFrame(download_frame)
         info_frame.pack(fill="x", pady=5, padx=10)
 
         self.info_text = ctk.CTkTextbox(info_frame, height=100, state="disabled")
         self.info_text.pack(fill="both", expand=True)
 
         # Quality Selection
-        quality_frame = ctk.CTkFrame(download_tab)
+        quality_frame = ctk.CTkFrame(download_frame)
         quality_frame.pack(fill="x", pady=5, padx=10)
 
         quality_label = ctk.CTkLabel(quality_frame, text="Quality:")
@@ -255,12 +299,12 @@ class YouTubeDownloader(ctk.CTk):
         self.quality_optionmenu.set("Best")
 
         # Download Button and Progress
-        download_button = ctk.CTkButton(download_tab, text="Download", command=self.download)
+        download_button = ctk.CTkButton(download_frame, text="Download", command=self.download)
         download_button.pack(fill="x", pady=5, padx=10)
         self.download_button = download_button
         self.download_button.configure(state="disabled")
 
-        progress_frame = ctk.CTkFrame(download_tab)
+        progress_frame = ctk.CTkFrame(download_frame)
         progress_frame.pack(fill="x", pady=5, padx=10)
 
         self.progress_bar = ctk.CTkProgressBar(progress_frame)
@@ -272,15 +316,15 @@ class YouTubeDownloader(ctk.CTk):
 
         # Status Label
         self.download_status_var = StringVar(value="Idle")
-        self.download_status_label = ctk.CTkLabel(download_tab, textvariable=self.download_status_var)
+        self.download_status_label = ctk.CTkLabel(download_frame, textvariable=self.download_status_var)
         self.download_status_label.pack(fill="x", pady=5, padx=10)
 
         # Log Textbox
-        self.log_text = ctk.CTkTextbox(download_tab, height=150, state="disabled")
+        self.log_text = ctk.CTkTextbox(download_frame, height=150, state="disabled")
         self.log_text.pack(fill="both", expand=True, pady=5, padx=10)
 
         # Control Buttons
-        control_frame = ctk.CTkFrame(download_tab)
+        control_frame = ctk.CTkFrame(download_frame)
         control_frame.pack(fill="x", pady=5, padx=10)
 
         stop_button = ctk.CTkButton(control_frame, text="Stop", command=self.stop_download, state="disabled")
@@ -290,12 +334,12 @@ class YouTubeDownloader(ctk.CTk):
         clear_log_button = ctk.CTkButton(control_frame, text="Clear Log", command=self.clear_log)
         clear_log_button.pack(side="left", padx=5)
 
-    def create_analysis_tab(self):
-        analysis_tab = self.tabview.tab("Analysis")
-        analysis_tab.grid_columnconfigure(0, weight=1)
+    def create_analysis_frame(self):
+        analysis_frame = self.analysis_frame
+        analysis_frame.grid_columnconfigure(0, weight=1)
 
         # Similarity Threshold
-        threshold_frame = ctk.CTkFrame(analysis_tab)
+        threshold_frame = ctk.CTkFrame(analysis_frame)
         threshold_frame.pack(fill="x", pady=5, padx=10)
 
         similarity_label = ctk.CTkLabel(threshold_frame, text="Similarity Threshold:")
@@ -310,7 +354,7 @@ class YouTubeDownloader(ctk.CTk):
         self.similarity_value_label.pack(side="left")
 
         # Analyze and Save Buttons
-        analyze_frame = ctk.CTkFrame(analysis_tab)
+        analyze_frame = ctk.CTkFrame(analysis_frame)
         analyze_frame.pack(fill="x", pady=5, padx=10)
 
         analyze_button = ctk.CTkButton(analyze_frame, text="Find Similar Frames", command=self.analyze_frames)
@@ -326,12 +370,12 @@ class YouTubeDownloader(ctk.CTk):
         export_button.pack(side="left", fill="x", expand=True, padx=5)
         self.export_button = export_button
 
-        download_all_button = ctk.CTkButton(analysis_tab, text="Download All Frames", command=self.download_all_frames, state="disabled")
+        download_all_button = ctk.CTkButton(analysis_frame, text="Download All Frames", command=self.download_all_frames, state="disabled")
         download_all_button.pack(fill="x", pady=5, padx=10)
         self.download_all_frames_button = download_all_button
 
         # Similar Frames Display with Treeview
-        display_frame = ctk.CTkFrame(analysis_tab)
+        display_frame = ctk.CTkFrame(analysis_frame)
         display_frame.pack(fill="both", expand=True, pady=5, padx=10)
 
         # Adding a Treeview to display timestamps and similarity
@@ -350,7 +394,7 @@ class YouTubeDownloader(ctk.CTk):
         scrollbar.pack(side="right", fill="y")
 
         # Frame Preview Section
-        preview_frame = ctk.CTkFrame(analysis_tab)
+        preview_frame = ctk.CTkFrame(analysis_frame)
         preview_frame.pack(fill="both", expand=True, pady=5, padx=10)
 
         self.preview_label = ctk.CTkLabel(preview_frame, text="Selected Frame Preview:", anchor="w")
@@ -361,24 +405,24 @@ class YouTubeDownloader(ctk.CTk):
 
         # Status Label
         self.analysis_status_var = StringVar(value="Idle")
-        self.analysis_status_label = ctk.CTkLabel(analysis_tab, textvariable=self.analysis_status_var)
+        self.analysis_status_label = ctk.CTkLabel(analysis_frame, textvariable=self.analysis_status_var)
         self.analysis_status_label.pack(fill="x", pady=5, padx=10)
 
-    def create_settings_tab(self):
-        settings_tab = self.tabview.tab("Settings")
-        settings_tab.grid_columnconfigure(0, weight=1)
+    def create_settings_frame(self):
+        settings_frame = self.settings_frame
+        settings_frame.grid_columnconfigure(0, weight=1)
 
         # Theme Switch
-        theme_frame = ctk.CTkFrame(settings_tab)
+        theme_frame = ctk.CTkFrame(settings_frame)
         theme_frame.pack(fill="x", pady=10, padx=10)
 
         self.theme_switch_var = ctk.StringVar(value="dark")
         self.theme_switch = ctk.CTkSwitch(theme_frame, text="Light Mode", command=self.change_theme,
-                                         variable=self.theme_switch_var, onvalue="light", offvalue="dark")
+                                          variable=self.theme_switch_var, onvalue="light", offvalue="dark")
         self.theme_switch.pack(side="left")
 
         # GitHub and About Buttons
-        info_frame = ctk.CTkFrame(settings_tab)
+        info_frame = ctk.CTkFrame(settings_frame)
         info_frame.pack(fill="x", pady=10, padx=10)
 
         github_button = ctk.CTkButton(info_frame, text="GitHub", command=self.open_github)
@@ -388,11 +432,11 @@ class YouTubeDownloader(ctk.CTk):
         about_button.pack(side="left", padx=5)
 
         # Open Download Folder
-        folder_button = ctk.CTkButton(settings_tab, text="Open Download Folder", command=self.open_download_folder)
+        folder_button = ctk.CTkButton(settings_frame, text="Open Download Folder", command=self.open_download_folder)
         folder_button.pack(fill="x", pady=5, padx=10)
 
         # Quit Button
-        quit_button = ctk.CTkButton(settings_tab, text="Quit", command=self.quit_app)
+        quit_button = ctk.CTkButton(settings_frame, text="Quit", command=self.quit_app)
         quit_button.pack(fill="x", pady=5, padx=10)
 
     def update_similarity_label(self, value):
@@ -406,6 +450,11 @@ class YouTubeDownloader(ctk.CTk):
         url = self.url_entry.get()
         if not url:
             messagebox.showwarning("Error", "Please enter a YouTube URL.")
+            return
+
+        # Validate URL
+        if not re.match(r'^https?://(www\.)?youtube\.com/watch\?v=', url):
+            messagebox.showwarning("Invalid URL", "Please enter a valid YouTube video URL.")
             return
 
         try:
@@ -429,9 +478,12 @@ class YouTubeDownloader(ctk.CTk):
 
                 messagebox.showinfo("Success", "Video information fetched successfully!")
 
+        except yt_dlp.utils.DownloadError as e:
+            self.log(f"Download error: {str(e)}")
+            messagebox.showerror("Download Error", f"An error occurred while fetching video info:\n{str(e)}")
         except Exception as e:
             self.log(f"Error fetching video info: {str(e)}")
-            messagebox.showerror("Error", f"An error occurred: {str(e)}")
+            messagebox.showerror("Error", f"An unexpected error occurred: {str(e)}")
 
     def display_video_info(self):
         if not self.video_info:
